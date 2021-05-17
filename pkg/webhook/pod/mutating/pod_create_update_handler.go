@@ -19,7 +19,9 @@ package mutating
 import (
 	"context"
 	"encoding/json"
+	"k8s.io/klog"
 	"net/http"
+	"os"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,7 +46,6 @@ var _ admission.Handler = &PodCreateHandler{}
 // Handle handles admission requests.
 func (h *PodCreateHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
 	obj := &corev1.Pod{}
-
 	err := h.Decoder.Decode(req, obj)
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
@@ -54,14 +55,31 @@ func (h *PodCreateHandler) Handle(ctx context.Context, req admission.Request) ad
 		obj.Namespace = req.Namespace
 	}
 
-	injectPodReadinessGate(req, obj)
+	// Get vlan tenant from env
+	tenant := os.Getenv("io.contiv.tenant")
+	// Get vlan network from env
+	network := os.Getenv("io.contiv.network")
+	klog.Infof("io.contiv.tenant is %v,io.contiv.network is %v", tenant, network)
 
-	err = h.sidecarsetMutatingPod(ctx, req, obj)
+	copy := obj.DeepCopy()
+	injectPodReadinessGate(req, copy)
+	err = h.sidecarsetMutatingPod(ctx, req, copy)
 	if err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-
-	marshalled, err := json.Marshal(obj)
+	if copy.Labels == nil {
+		copy.Labels = make(map[string]string)
+		copy.Labels["io.contiv.tenant"] = tenant
+		copy.Labels["io.contiv.network"] = network
+	} else {
+		if _, ok := copy.Labels["io.contiv.tenant"]; !ok {
+			copy.Labels["io.contiv.tenant"] = tenant
+		}
+		if _, ok := copy.Labels["io.contiv.network"]; !ok {
+			copy.Labels["io.contiv.network"] = network
+		}
+	}
+	marshalled, err := json.Marshal(copy)
 	if err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
